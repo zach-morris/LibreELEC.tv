@@ -39,7 +39,7 @@ make_target() {
         --host=$TARGET_NAME \
         --build=$HOST_NAME \
         --enable-static \
-        --disable-shared \
+        --enable-shared \
         --prefix=/usr \
         --enable-visibility \
         --disable-libcurl \
