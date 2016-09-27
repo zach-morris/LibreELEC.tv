@@ -1,0 +1,693 @@
+diff --git a/src/intel/isl/isl.h b/src/intel/isl/isl.h
+index d2f0e16..007dd80 100644
+--- a/src/intel/isl/isl.h
++++ b/src/intel/isl/isl.h
+@@ -358,7 +358,7 @@ enum isl_format {
+     * actual hardware formats *must* come before these in the list.
+     */
+ 
+-   /* Formats for color compression surfaces */
++   /* Formats for auxiliary surfaces */
+    ISL_FORMAT_HIZ,
+    ISL_FORMAT_MCS_2X,
+    ISL_FORMAT_MCS_4X,
+diff --git a/src/intel/isl/isl.c b/src/intel/isl/isl.c
+index b6e88ad..c68ab45 100644
+--- a/src/intel/isl/isl.c
++++ b/src/intel/isl/isl.c
+@@ -1287,27 +1287,54 @@ isl_surf_get_tile_info(const struct isl_device *dev,
+    isl_tiling_get_info(dev, surf->tiling, fmtl->bpb, tile_info);
+ }
+ 
++/**
++ * \todo Implement the correct dimensions pre-BDW.
++ */
+ void
+ isl_surf_get_hiz_surf(const struct isl_device *dev,
+                       const struct isl_surf *surf,
+                       struct isl_surf *hiz_surf)
+ {
++   assert(surf->usage & ISL_SURF_USAGE_DEPTH_BIT);
++   assert(surf->usage & ~ISL_SURF_USAGE_DISABLE_AUX_BIT);
++
+    assert(ISL_DEV_GEN(dev) >= 5 && ISL_DEV_USE_SEPARATE_STENCIL(dev));
+ 
+    /* Multisampled depth is always interleaved */
+    assert(surf->msaa_layout == ISL_MSAA_LAYOUT_NONE ||
+           surf->msaa_layout == ISL_MSAA_LAYOUT_INTERLEAVED);
+ 
++   uint32_t width, height;
++
++   /* On SKL+, one HiZ sample maps to one depth pixel and
++    * and the miplayout is recalculated.
++    */
++   if (ISL_DEV_GEN(dev) >= 9) {
++      width = surf->logical_level0_px.width;
++      height = surf->logical_level0_px.height;
++   } else {
++      /* On BDW+, one HiZ sample maps to one depth sample and
++       * and the miplayout is recalculated.
++       */
++      width = surf->phys_level0_sa.width;
++      height = surf->phys_level0_sa.height;
++   }
++
+    isl_surf_init(dev, hiz_surf,
+-                 .dim = ISL_SURF_DIM_2D,
++                 /* The layout of a 2D HiZ surface is identical to that of a
++                  * 1D HiZ surface HSW+. Since ISL doesn't support compressed
++                  * 1D surfaces currently and it is not yet needed, change the
++                  * dimension for now.
++                  */
++                 .dim = surf->dim == ISL_SURF_DIM_1D ?
++                        ISL_SURF_DIM_2D : surf->dim,
+                  .format = ISL_FORMAT_HIZ,
+-                 .width = surf->logical_level0_px.width,
+-                 .height = surf->logical_level0_px.height,
+-                 .depth = 1,
++                 .width = width,
++                 .height = height,
++                 .depth = surf->logical_level0_px.depth,
+                  .levels = surf->levels,
+                  .array_len = surf->logical_level0_px.array_len,
+-                 /* On SKL+, HiZ is always single-sampled */
+-                 .samples = ISL_DEV_GEN(dev) >= 9 ? 1 : surf->samples,
++                 .samples = 1,
+                  .usage = ISL_SURF_USAGE_HIZ_BIT,
+                  .tiling_flags = ISL_TILING_HIZ_BIT);
+ }
+diff --git a/src/intel/vulkan/anv_private.h b/src/intel/vulkan/anv_private.h
+index 443c31f..7e08786 100644
+--- a/src/intel/vulkan/anv_private.h
++++ b/src/intel/vulkan/anv_private.h
+@@ -1651,6 +1651,7 @@ anv_pipeline_setup_l3_config(struct anv_pipeline *pipeline, bool needs_slm);
+  * Subsurface of an anv_image.
+  */
+ struct anv_surface {
++   /** Valid only if isl_surf::size > 0. */
+    struct isl_surf isl;
+ 
+    /**
+@@ -1697,6 +1698,7 @@ struct anv_image {
+ 
+       struct {
+          struct anv_surface depth_surface;
++         struct anv_surface hiz_surface;
+          struct anv_surface stencil_surface;
+       };
+    };
+diff --git a/src/intel/vulkan/anv_private.h b/src/intel/vulkan/anv_private.h
+index 7e08786..5f925df 100644
+--- a/src/intel/vulkan/anv_private.h
++++ b/src/intel/vulkan/anv_private.h
+@@ -1762,6 +1762,16 @@ const struct anv_surface *
+ anv_image_get_surface_for_aspect_mask(const struct anv_image *image,
+                                       VkImageAspectFlags aspect_mask);
+ 
++static inline bool
++anv_image_has_hiz(const struct anv_image *image)
++{
++   /* We must check the aspect because anv_image::hiz_surface belongs to
++    * a union.
++    */
++   return (image->aspects & VK_IMAGE_ASPECT_DEPTH_BIT) &&
++          image->hiz_surface.isl.size > 0;
++}
++
+ void anv_image_view_init(struct anv_image_view *view,
+                          struct anv_device *device,
+                          const VkImageViewCreateInfo* pCreateInfo,
+diff --git a/src/intel/vulkan/anv_image.c b/src/intel/vulkan/anv_image.c
+index f6e8672..d408819 100644
+--- a/src/intel/vulkan/anv_image.c
++++ b/src/intel/vulkan/anv_image.c
+@@ -28,6 +28,7 @@
+ #include <fcntl.h>
+ 
+ #include "anv_private.h"
++#include "util/debug.h"
+ 
+ #include "vk_format_info.h"
+ 
+@@ -60,6 +61,7 @@ choose_isl_surf_usage(VkImageUsageFlags vk_usage,
+       default:
+          unreachable("bad VkImageAspect");
+       case VK_IMAGE_ASPECT_DEPTH_BIT:
++         isl_usage &= ~ISL_SURF_USAGE_DISABLE_AUX_BIT;
+          isl_usage |= ISL_SURF_USAGE_DEPTH_BIT;
+          break;
+       case VK_IMAGE_ASPECT_STENCIL_BIT:
+@@ -99,6 +101,16 @@ get_surface(struct anv_image *image, VkImageAspectFlags aspect)
+    }
+ }
+ 
++static void
++add_surface(struct anv_image *image, struct anv_surface *surf)
++{
++   assert(surf->isl.size > 0); /* isl surface must be initialized */
++
++   surf->offset = align_u32(image->size, surf->isl.alignment);
++   image->size = surf->offset + surf->isl.size;
++   image->alignment = MAX(image->alignment, surf->isl.alignment);
++}
++
+ /**
+  * Initialize the anv_image::*_surface selected by \a aspect. Then update the
+  * image's memory requirements (that is, the image's size and alignment).
+@@ -160,9 +172,30 @@ make_surface(const struct anv_device *dev,
+     */
+    assert(ok);
+ 
+-   anv_surf->offset = align_u32(image->size, anv_surf->isl.alignment);
+-   image->size = anv_surf->offset + anv_surf->isl.size;
+-   image->alignment = MAX(image->alignment, anv_surf->isl.alignment);
++   add_surface(image, anv_surf);
++
++   /* Allow the user to control HiZ enabling. Disable by default on gen7
++    * because resolves are not currently implemented pre-BDW.
++    */
++   if (!env_var_as_boolean("INTEL_VK_HIZ", dev->info.gen >= 8)) {
++      anv_finishme("Implement gen7 HiZ");
++      return VK_SUCCESS;
++   } else if (vk_info->mipLevels > 1) {
++      anv_finishme("Test multi-LOD HiZ");
++      return VK_SUCCESS;
++   } else if (dev->info.gen == 8 && vk_info->samples > 1) {
++      anv_finishme("Test gen8 multisampled HiZ");
++      return VK_SUCCESS;
++   }
++
++   /* Add a HiZ surface to a depth buffer that will be used for rendering.
++    */
++   if (aspect == VK_IMAGE_ASPECT_DEPTH_BIT &&
++       (image->usage & VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT)) {
++      isl_surf_get_hiz_surf(&dev->isl_dev, &image->depth_surface.isl,
++                            &image->hiz_surface.isl);
++      add_surface(image, &image->hiz_surface);
++   }
+ 
+    return VK_SUCCESS;
+ }
+diff --git a/src/intel/vulkan/anv_device.c b/src/intel/vulkan/anv_device.c
+index f786ebe..bc623e7 100644
+--- a/src/intel/vulkan/anv_device.c
++++ b/src/intel/vulkan/anv_device.c
+@@ -1421,26 +1421,6 @@ VkResult anv_BindBufferMemory(
+    return VK_SUCCESS;
+ }
+ 
+-VkResult anv_BindImageMemory(
+-    VkDevice                                    device,
+-    VkImage                                     _image,
+-    VkDeviceMemory                              _memory,
+-    VkDeviceSize                                memoryOffset)
+-{
+-   ANV_FROM_HANDLE(anv_device_memory, mem, _memory);
+-   ANV_FROM_HANDLE(anv_image, image, _image);
+-
+-   if (mem) {
+-      image->bo = &mem->bo;
+-      image->offset = memoryOffset;
+-   } else {
+-      image->bo = NULL;
+-      image->offset = 0;
+-   }
+-
+-   return VK_SUCCESS;
+-}
+-
+ VkResult anv_QueueBindSparse(
+     VkQueue                                     queue,
+     uint32_t                                    bindInfoCount,
+diff --git a/src/intel/vulkan/anv_image.c b/src/intel/vulkan/anv_image.c
+index d408819..57b2014 100644
+--- a/src/intel/vulkan/anv_image.c
++++ b/src/intel/vulkan/anv_image.c
+@@ -318,6 +318,26 @@ anv_DestroyImage(VkDevice _device, VkImage _image,
+    anv_free2(&device->alloc, pAllocator, anv_image_from_handle(_image));
+ }
+ 
++VkResult anv_BindImageMemory(
++    VkDevice                                    device,
++    VkImage                                     _image,
++    VkDeviceMemory                              _memory,
++    VkDeviceSize                                memoryOffset)
++{
++   ANV_FROM_HANDLE(anv_device_memory, mem, _memory);
++   ANV_FROM_HANDLE(anv_image, image, _image);
++
++   if (mem) {
++      image->bo = &mem->bo;
++      image->offset = memoryOffset;
++   } else {
++      image->bo = NULL;
++      image->offset = 0;
++   }
++
++   return VK_SUCCESS;
++}
++
+ static void
+ anv_surface_get_subresource_layout(struct anv_image *image,
+                                    struct anv_surface *surface,
+diff --git a/src/intel/vulkan/anv_image.c b/src/intel/vulkan/anv_image.c
+index 57b2014..1cdb71f 100644
+--- a/src/intel/vulkan/anv_image.c
++++ b/src/intel/vulkan/anv_image.c
+@@ -319,11 +319,12 @@ anv_DestroyImage(VkDevice _device, VkImage _image,
+ }
+ 
+ VkResult anv_BindImageMemory(
+-    VkDevice                                    device,
++    VkDevice                                    _device,
+     VkImage                                     _image,
+     VkDeviceMemory                              _memory,
+     VkDeviceSize                                memoryOffset)
+ {
++   ANV_FROM_HANDLE(anv_device, device, _device);
+    ANV_FROM_HANDLE(anv_device_memory, mem, _memory);
+    ANV_FROM_HANDLE(anv_image, image, _image);
+ 
+@@ -335,6 +336,34 @@ VkResult anv_BindImageMemory(
+       image->offset = 0;
+    }
+ 
++   if (anv_image_has_hiz(image)) {
++
++      /* The offset and size must be a multiple of 4K or else the
++       * anv_gem_mmap call below will return NULL.
++       */
++      assert((image->offset + image->hiz_surface.offset) % 4096 == 0);
++      assert(image->hiz_surface.isl.size % 4096 == 0);
++
++      /* HiZ surfaces need to have their memory cleared to 0 before they
++       * can be used.  If we let it have garbage data, it can cause GPU
++       * hangs on some hardware.
++       */
++      void *map = anv_gem_mmap(device, image->bo->gem_handle,
++                               image->offset + image->hiz_surface.offset,
++                               image->hiz_surface.isl.size,
++                               device->info.has_llc ? 0 : I915_MMAP_WC);
++
++      /* If anv_gem_mmap returns NULL, it's likely that the kernel was
++       * not able to find space on the host to create a proper mapping.
++       */
++      if (map == NULL)
++         return vk_error(VK_ERROR_OUT_OF_HOST_MEMORY);
++
++      memset(map, 0, image->hiz_surface.isl.size);
++
++      anv_gem_munmap(map, image->hiz_surface.isl.size);
++   }
++
+    return VK_SUCCESS;
+ }
+ 
+diff --git a/src/intel/vulkan/anv_genX.h b/src/intel/vulkan/anv_genX.h
+index 02e79c2..ad3bec9 100644
+--- a/src/intel/vulkan/anv_genX.h
++++ b/src/intel/vulkan/anv_genX.h
+@@ -58,6 +58,9 @@ genX(emit_urb_setup)(struct anv_device *device, struct anv_batch *batch,
+                      unsigned vs_entry_size, unsigned gs_entry_size,
+                      const struct gen_l3_config *l3_config);
+ 
++void genX(cmd_buffer_do_hz_op)(struct anv_cmd_buffer *cmd_buffer,
++                               enum blorp_hiz_op op);
++
+ VkResult
+ genX(graphics_pipeline_create)(VkDevice _device,
+                                struct anv_pipeline_cache *cache,
+diff --git a/src/intel/vulkan/gen7_cmd_buffer.c b/src/intel/vulkan/gen7_cmd_buffer.c
+index b627ef0..78b5ac7 100644
+--- a/src/intel/vulkan/gen7_cmd_buffer.c
++++ b/src/intel/vulkan/gen7_cmd_buffer.c
+@@ -323,6 +323,12 @@ genX(cmd_buffer_flush_dynamic_state)(struct anv_cmd_buffer *cmd_buffer)
+    cmd_buffer->state.dirty = 0;
+ }
+ 
++void
++genX(cmd_buffer_do_hz_op)(struct anv_cmd_buffer *cmd_buffer,
++                          enum blorp_hiz_op op)
++{
++}
++
+ void genX(CmdSetEvent)(
+     VkCommandBuffer                             commandBuffer,
+     VkEvent                                     event,
+diff --git a/src/intel/vulkan/gen8_cmd_buffer.c b/src/intel/vulkan/gen8_cmd_buffer.c
+index 7058608..a13413c 100644
+--- a/src/intel/vulkan/gen8_cmd_buffer.c
++++ b/src/intel/vulkan/gen8_cmd_buffer.c
+@@ -399,6 +399,173 @@ genX(cmd_buffer_flush_compute_state)(struct anv_cmd_buffer *cmd_buffer)
+    genX(cmd_buffer_apply_pipe_flushes)(cmd_buffer);
+ }
+ 
++
++/**
++ * Emit the HZ_OP packet in the sequence specified by the BDW PRM section
++ * entitled: "Optimized Depth Buffer Clear and/or Stencil Buffer Clear."
++ *
++ * \todo Enable Stencil Buffer-only clears
++ */
++void
++genX(cmd_buffer_do_hz_op)(struct anv_cmd_buffer *cmd_buffer,
++                          enum blorp_hiz_op op)
++{
++   struct anv_cmd_state *cmd_state = &cmd_buffer->state;
++   const struct anv_image_view *iview =
++      anv_cmd_buffer_get_depth_stencil_view(cmd_buffer);
++
++   if (iview == NULL || !anv_image_has_hiz(iview->image))
++      return;
++
++   const uint32_t ds = cmd_state->subpass->depth_stencil_attachment;
++   const bool full_surface_op =
++             cmd_state->render_area.extent.width == iview->extent.width &&
++             cmd_state->render_area.extent.height == iview->extent.height;
++
++   /* Validate that we can perform the HZ operation and that it's necessary. */
++   switch (op) {
++   case BLORP_HIZ_OP_DEPTH_CLEAR:
++      if (cmd_buffer->state.pass->attachments[ds].load_op !=
++          VK_ATTACHMENT_LOAD_OP_CLEAR)
++         return;
++
++      /* Apply alignment restrictions. Despite the BDW PRM mentioning this is
++       * only needed for a depth buffer surface type of D16_UNORM, testing
++       * showed it to be necessary for other depth formats as well
++       * (e.g., D32_FLOAT).
++       */
++      if (!full_surface_op) {
++
++         struct isl_extent2d px_dim;
++#if GEN_GEN == 8
++         /* Pre-SKL, HiZ has an 8x4 sample block. As the number of samples
++          * increases, the number of pixels representable by this block
++          * decreases by a factor of the sample dimensions. Sample dimensions
++          * scale following the MSAA interleaved pattern.
++          *
++          * Sample|Sample|Pixel
++          * Count |Dim   |Dim
++          * ===================
++          *    1  | 1x1  | 8x4
++          *    2  | 2x1  | 4x4
++          *    4  | 2x2  | 4x2
++          *    8  | 4x2  | 2x2
++          *   16  | 4x4  | 2x1
++          *
++          * Table: Pixel Dimensions in a HiZ Sample Block Pre-SKL
++          */
++         const struct isl_extent2d sa_dim =
++            isl_get_interleaved_msaa_px_size_sa(iview->image->samples);
++         px_dim.w = 8 / sa_dim.w;
++         px_dim.h = 4 / sa_dim.h;
++#else
++         /* SKL+, the sample block becomes a "pixel block" so the expected
++          * pixel dimension is a constant 8x4 px for all sample counts.
++          */
++         px_dim = (struct isl_extent2d) { .w = 8, .h = 4};
++#endif
++
++         /* Fast depth clears clear an entire sample block at a time. As a
++          * result, the rectangle must be aligned to the pixel dimensions of
++          * a sample block for a successful operation.
++          */
++         if (cmd_state->render_area.offset.x % px_dim.w ||
++             cmd_state->render_area.offset.y % px_dim.h ||
++             cmd_state->render_area.extent.width % px_dim.w ||
++             cmd_state->render_area.extent.height % px_dim.h)
++            return;
++      }
++      break;
++   case BLORP_HIZ_OP_DEPTH_RESOLVE:
++      if (cmd_buffer->state.pass->attachments[ds].store_op !=
++          VK_ATTACHMENT_STORE_OP_STORE)
++         return;
++      break;
++   case BLORP_HIZ_OP_HIZ_RESOLVE:
++      if (cmd_buffer->state.pass->attachments[ds].load_op !=
++          VK_ATTACHMENT_LOAD_OP_LOAD)
++         return;
++      break;
++   case BLORP_HIZ_OP_NONE:
++      unreachable("Invalid HiZ OP");
++      break;
++   }
++
++   anv_batch_emit(&cmd_buffer->batch, GENX(3DSTATE_WM_HZ_OP), hzp) {
++      switch (op) {
++      case BLORP_HIZ_OP_DEPTH_CLEAR:
++         hzp.StencilBufferClearEnable = VK_IMAGE_ASPECT_STENCIL_BIT &
++                            cmd_state->attachments[ds].pending_clear_aspects;
++         hzp.DepthBufferClearEnable = VK_IMAGE_ASPECT_DEPTH_BIT &
++                            cmd_state->attachments[ds].pending_clear_aspects;
++         hzp.FullSurfaceDepthandStencilClear = full_surface_op;
++         hzp.StencilClearValue = 0xff &
++                   cmd_state->attachments[ds].clear_value.depthStencil.stencil;
++
++         /* Mark aspects as cleared */
++         cmd_state->attachments[ds].pending_clear_aspects = 0;
++         break;
++      case BLORP_HIZ_OP_DEPTH_RESOLVE:
++         hzp.DepthBufferResolveEnable = true;
++         break;
++      case BLORP_HIZ_OP_HIZ_RESOLVE:
++         hzp.HierarchicalDepthBufferResolveEnable = true;
++         break;
++      case BLORP_HIZ_OP_NONE:
++         unreachable("Invalid HiZ OP");
++         break;
++      }
++
++      if (op != BLORP_HIZ_OP_DEPTH_CLEAR) {
++         /* The Optimized HiZ resolve rectangle must be the size of the full RT
++          * and aligned to 8x4. The non-optimized Depth resolve rectangle must
++          * be the size of the full RT. The same alignment is assumed to be
++          * required.
++          *
++          * TODO:
++          * Consider changing halign of non-D16 depth formats to 8 as mip 2 may
++          * get clobbered.
++          */
++         hzp.ClearRectangleXMax = align_u32(iview->extent.width, 8);
++         hzp.ClearRectangleYMax = align_u32(iview->extent.height, 4);
++      } else {
++         /* This clear rectangle is aligned */
++         hzp.ClearRectangleXMin = cmd_state->render_area.offset.x;
++         hzp.ClearRectangleYMin = cmd_state->render_area.offset.y;
++         hzp.ClearRectangleXMax = cmd_state->render_area.offset.x +
++                                  cmd_state->render_area.extent.width;
++         hzp.ClearRectangleYMax = cmd_state->render_area.offset.y +
++                                  cmd_state->render_area.extent.height;
++      }
++
++
++      /* Due to a hardware issue, this bit MBZ */
++      hzp.ScissorRectangleEnable = false;
++      hzp.NumberofMultisamples = ffs(iview->image->samples) - 1;
++      hzp.SampleMask = 0xFFFF;
++   }
++
++   anv_batch_emit(&cmd_buffer->batch, GENX(PIPE_CONTROL), pc) {
++      pc.PostSyncOperation = WriteImmediateData;
++      pc.Address =
++         (struct anv_address){ &cmd_buffer->device->workaround_bo, 0 };
++   }
++
++   anv_batch_emit(&cmd_buffer->batch, GENX(3DSTATE_WM_HZ_OP), hzp);
++
++   /* TODO:
++    * Determine if a DepthCacheFlushEnable and DepthStallEnable is really
++    * necessary for non-full_surface_op clears. Performing a HZ op without
++    * this pipecontrol showed no impact on rendering results.
++    */
++   if (!full_surface_op && op == BLORP_HIZ_OP_DEPTH_CLEAR) {
++      anv_batch_emit(&cmd_buffer->batch, GENX(PIPE_CONTROL), pc) {
++         pc.DepthStallEnable = true;
++         pc.DepthCacheFlushEnable = true;
++      }
++   }
++}
++
+ void genX(CmdSetEvent)(
+     VkCommandBuffer                             commandBuffer,
+     VkEvent                                     _event,
+diff --git a/src/intel/vulkan/gen8_cmd_buffer.c b/src/intel/vulkan/gen8_cmd_buffer.c
+index a13413c..14e6a7b 100644
+--- a/src/intel/vulkan/gen8_cmd_buffer.c
++++ b/src/intel/vulkan/gen8_cmd_buffer.c
+@@ -417,6 +417,10 @@ genX(cmd_buffer_do_hz_op)(struct anv_cmd_buffer *cmd_buffer,
+    if (iview == NULL || !anv_image_has_hiz(iview->image))
+       return;
+ 
++   /* FIXME: Implement multi-subpass HiZ */
++   if (cmd_buffer->state.pass->subpass_count > 1)
++      return;
++
+    const uint32_t ds = cmd_state->subpass->depth_stencil_attachment;
+    const bool full_surface_op =
+              cmd_state->render_area.extent.width == iview->extent.width &&
+diff --git a/src/intel/vulkan/genX_cmd_buffer.c b/src/intel/vulkan/genX_cmd_buffer.c
+index 6a84383..2cb1539 100644
+--- a/src/intel/vulkan/genX_cmd_buffer.c
++++ b/src/intel/vulkan/genX_cmd_buffer.c
+@@ -1199,6 +1199,7 @@ cmd_buffer_emit_depth_stencil(struct anv_cmd_buffer *cmd_buffer)
+       anv_cmd_buffer_get_depth_stencil_view(cmd_buffer);
+    const struct anv_image *image = iview ? iview->image : NULL;
+    const bool has_depth = image && (image->aspects & VK_IMAGE_ASPECT_DEPTH_BIT);
++   const bool has_hiz = image != NULL && anv_image_has_hiz(image);
+    const bool has_stencil =
+       image && (image->aspects & VK_IMAGE_ASPECT_STENCIL_BIT);
+ 
+@@ -1211,7 +1212,12 @@ cmd_buffer_emit_depth_stencil(struct anv_cmd_buffer *cmd_buffer)
+          db.SurfaceType                   = SURFTYPE_2D;
+          db.DepthWriteEnable              = true;
+          db.StencilWriteEnable            = has_stencil;
+-         db.HierarchicalDepthBufferEnable = false;
++
++         if (cmd_buffer->state.pass->subpass_count == 1) {
++            db.HierarchicalDepthBufferEnable = has_hiz;
++         } else {
++            anv_finishme("Multiple-subpass HiZ not implemented");
++         }
+ 
+          db.SurfaceFormat = isl_surf_get_depth_format(&device->isl_dev,
+                                                       &image->depth_surface.isl);
+@@ -1263,6 +1269,36 @@ cmd_buffer_emit_depth_stencil(struct anv_cmd_buffer *cmd_buffer)
+       }
+    }
+ 
++   if (has_hiz) {
++      anv_batch_emit(&cmd_buffer->batch, GENX(3DSTATE_HIER_DEPTH_BUFFER), hdb) {
++         hdb.HierarchicalDepthBufferObjectControlState = GENX(MOCS);
++         hdb.SurfacePitch = image->hiz_surface.isl.row_pitch - 1;
++         hdb.SurfaceBaseAddress = (struct anv_address) {
++            .bo = image->bo,
++            .offset = image->offset + image->hiz_surface.offset,
++         };
++#if GEN_GEN >= 8
++         /* From the SKL PRM Vol2a:
++          *
++          *    The interpretation of this field is dependent on Surface Type
++          *    as follows:
++          *    - SURFTYPE_1D: distance in pixels between array slices
++          *    - SURFTYPE_2D/CUBE: distance in rows between array slices
++          *    - SURFTYPE_3D: distance in rows between R - slices
++          *
++          * ISL implements HiZ surfaces for 1D depth buffers as 2D. Therefore
++          * the depth buffer needs to be checked for the dimension.
++          */
++         hdb.SurfaceQPitch =
++            image->depth_surface.isl.dim == ISL_SURF_DIM_1D ?
++               isl_surf_get_array_pitch_el(&image->hiz_surface.isl) >> 2 :
++               isl_surf_get_array_pitch_el_rows(&image->hiz_surface.isl) >> 2;
++#endif
++      }
++   } else {
++      anv_batch_emit(&cmd_buffer->batch, GENX(3DSTATE_HIER_DEPTH_BUFFER), hdb);
++   }
++
+    /* Emit 3DSTATE_STENCIL_BUFFER */
+    if (has_stencil) {
+       anv_batch_emit(&cmd_buffer->batch, GENX(3DSTATE_STENCIL_BUFFER), sb) {
+@@ -1285,9 +1321,6 @@ cmd_buffer_emit_depth_stencil(struct anv_cmd_buffer *cmd_buffer)
+       anv_batch_emit(&cmd_buffer->batch, GENX(3DSTATE_STENCIL_BUFFER), sb);
+    }
+ 
+-   /* Disable hierarchial depth buffers. */
+-   anv_batch_emit(&cmd_buffer->batch, GENX(3DSTATE_HIER_DEPTH_BUFFER), hz);
+-
+    /* Clear the clear params. */
+    anv_batch_emit(&cmd_buffer->batch, GENX(3DSTATE_CLEAR_PARAMS), cp);
+ }
+@@ -1323,6 +1356,7 @@ void genX(CmdBeginRenderPass)(
+    genX(flush_pipeline_select_3d)(cmd_buffer);
+ 
+    genX(cmd_buffer_set_subpass)(cmd_buffer, pass->subpasses);
++   genX(cmd_buffer_do_hz_op)(cmd_buffer, BLORP_HIZ_OP_HIZ_RESOLVE);
+    anv_cmd_buffer_clear_subpass(cmd_buffer);
+ }
+ 
+@@ -1344,6 +1378,7 @@ void genX(CmdEndRenderPass)(
+ {
+    ANV_FROM_HANDLE(anv_cmd_buffer, cmd_buffer, commandBuffer);
+ 
++   genX(cmd_buffer_do_hz_op)(cmd_buffer, BLORP_HIZ_OP_DEPTH_RESOLVE);
+    anv_cmd_buffer_resolve_subpass(cmd_buffer);
+ 
+ #ifndef NDEBUG
+diff --git a/src/intel/vulkan/anv_pass.c b/src/intel/vulkan/anv_pass.c
+index 69c3c7e..595c2ea 100644
+--- a/src/intel/vulkan/anv_pass.c
++++ b/src/intel/vulkan/anv_pass.c
+@@ -155,5 +155,18 @@ void anv_GetRenderAreaGranularity(
+     VkRenderPass                                renderPass,
+     VkExtent2D*                                 pGranularity)
+ {
++   ANV_FROM_HANDLE(anv_render_pass, pass, renderPass);
++
++   /* This granularity satisfies HiZ fast clear alignment requirements
++    * for all sample counts.
++    */
++   for (unsigned i = 0; i < pass->subpass_count; ++i) {
++      if (pass->subpasses[i].depth_stencil_attachment !=
++          VK_ATTACHMENT_UNUSED) {
++         *pGranularity = (VkExtent2D) { .width = 8, .height = 4 };
++         return;
++      }
++   }
++
+    *pGranularity = (VkExtent2D) { 1, 1 };
+ }
+diff --git a/src/intel/vulkan/gen8_cmd_buffer.c b/src/intel/vulkan/gen8_cmd_buffer.c
+index 14e6a7b..96e972c 100644
+--- a/src/intel/vulkan/gen8_cmd_buffer.c
++++ b/src/intel/vulkan/gen8_cmd_buffer.c
+@@ -479,6 +479,12 @@ genX(cmd_buffer_do_hz_op)(struct anv_cmd_buffer *cmd_buffer,
+              cmd_state->render_area.extent.height % px_dim.h)
+             return;
+       }
++
++      anv_batch_emit(&cmd_buffer->batch, GENX(3DSTATE_CLEAR_PARAMS), cp) {
++         cp.DepthClearValueValid = true;
++         cp.DepthClearValue =
++            cmd_buffer->state.attachments[ds].clear_value.depthStencil.depth;
++      }
+       break;
+    case BLORP_HIZ_OP_DEPTH_RESOLVE:
+       if (cmd_buffer->state.pass->attachments[ds].store_op !=
+diff --git a/src/intel/vulkan/genX_cmd_buffer.c b/src/intel/vulkan/genX_cmd_buffer.c
+index 2cb1539..290fefc 100644
+--- a/src/intel/vulkan/genX_cmd_buffer.c
++++ b/src/intel/vulkan/genX_cmd_buffer.c
+@@ -1320,9 +1320,6 @@ cmd_buffer_emit_depth_stencil(struct anv_cmd_buffer *cmd_buffer)
+    } else {
+       anv_batch_emit(&cmd_buffer->batch, GENX(3DSTATE_STENCIL_BUFFER), sb);
+    }
+-
+-   /* Clear the clear params. */
+-   anv_batch_emit(&cmd_buffer->batch, GENX(3DSTATE_CLEAR_PARAMS), cp);
+ }
+ 
+ /**
+@@ -1357,6 +1354,7 @@ void genX(CmdBeginRenderPass)(
+ 
+    genX(cmd_buffer_set_subpass)(cmd_buffer, pass->subpasses);
+    genX(cmd_buffer_do_hz_op)(cmd_buffer, BLORP_HIZ_OP_HIZ_RESOLVE);
++   genX(cmd_buffer_do_hz_op)(cmd_buffer, BLORP_HIZ_OP_DEPTH_CLEAR);
+    anv_cmd_buffer_clear_subpass(cmd_buffer);
+ }
+ 
+diff --git a/src/intel/vulkan/TODO b/src/intel/vulkan/TODO
+index 8fac370..9ac63eb 100644
+--- a/src/intel/vulkan/TODO
++++ b/src/intel/vulkan/TODO
+@@ -19,7 +19,7 @@ Code sharing with GL:
+  - Generalize blorp to use ISL and be sharable between the two drivers
+ 
+ Performance:
+- - HiZ (Nanley)
++ - Multi-{sampled/gen8,LOD,subpass} HiZ
+  - Fast color clears (after HiZ?)
+  - Compressed multisample support
+  - Renderbuffer compression (SKL+)
