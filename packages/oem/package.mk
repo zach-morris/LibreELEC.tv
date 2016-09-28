@@ -39,7 +39,8 @@ OEM_APPS_COMMON=" \
   plexmediaserver-script \
   SABnzbd \
   tcpdump \
-  transmission"
+  transmission \
+  unfs3"
 
 OEM_APPS_GENERIC=" \
   qemu"
