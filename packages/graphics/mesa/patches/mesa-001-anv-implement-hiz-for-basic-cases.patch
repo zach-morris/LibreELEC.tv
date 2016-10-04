@@ -15,15 +15,7 @@ diff --git a/src/intel/isl/isl.c b/src/intel/isl/isl.c
 index b6e88ad..c68ab45 100644
 --- a/src/intel/isl/isl.c
 +++ b/src/intel/isl/isl.c
-@@ -1287,27 +1287,54 @@ isl_surf_get_tile_info(const struct isl_device *dev,
-    isl_tiling_get_info(dev, surf->tiling, fmtl->bpb, tile_info);
- }
- 
-+/**
-+ * \todo Implement the correct dimensions pre-BDW.
-+ */
- void
- isl_surf_get_hiz_surf(const struct isl_device *dev,
+@@ -1309,12 +1309,31 @@
                        const struct isl_surf *surf,
                        struct isl_surf *hiz_surf)
  {
@@ -36,46 +28,51 @@ index b6e88ad..c68ab45 100644
     assert(surf->msaa_layout == ISL_MSAA_LAYOUT_NONE ||
            surf->msaa_layout == ISL_MSAA_LAYOUT_INTERLEAVED);
  
-+   uint32_t width, height;
++  uint32_t width, height;
 +
-+   /* On SKL+, one HiZ sample maps to one depth pixel and
++  /* On SKL+, one HiZ sample maps to one depth pixel and
++  * and the miplayout is recalculated.
++  */
++  if (ISL_DEV_GEN(dev) >= 9) {
++    width = surf->logical_level0_px.width;
++    height = surf->logical_level0_px.height;
++  } else {
++    /* On BDW+, one HiZ sample maps to one depth sample and
 +    * and the miplayout is recalculated.
 +    */
-+   if (ISL_DEV_GEN(dev) >= 9) {
-+      width = surf->logical_level0_px.width;
-+      height = surf->logical_level0_px.height;
-+   } else {
-+      /* On BDW+, one HiZ sample maps to one depth sample and
-+       * and the miplayout is recalculated.
-+       */
-+      width = surf->phys_level0_sa.width;
-+      height = surf->phys_level0_sa.height;
-+   }
++    width = surf->phys_level0_sa.width;
++    height = surf->phys_level0_sa.height;
++  }
 +
+    /* From the Broadwell PRM Vol. 7, "Hierarchical Depth Buffer":
+     *
+     *    "The Surface Type, Height, Width, Depth, Minimum Array Element, Render
+@@ -1370,14 +1389,20 @@
+     * without the need for additional HiZ formats with different block sizes
+     * on SKL+.
+     */
+-   const unsigned samples = ISL_DEV_GEN(dev) >= 9 ? 1 : surf->samples;
++   const unsigned samples = 1;
+ 
     isl_surf_init(dev, hiz_surf,
--                 .dim = ISL_SURF_DIM_2D,
+-                 .dim = surf->dim,
 +                 /* The layout of a 2D HiZ surface is identical to that of a
-+                  * 1D HiZ surface HSW+. Since ISL doesn't support compressed
-+                  * 1D surfaces currently and it is not yet needed, change the
-+                  * dimension for now.
-+                  */
++		  * 1D HiZ surface HSW+. Since ISL doesn't support compressed
++		  * 1D surfaces currently and it is not yet needed, change the
++		  * dimension for now.
++		  */
 +                 .dim = surf->dim == ISL_SURF_DIM_1D ?
 +                        ISL_SURF_DIM_2D : surf->dim,
                   .format = ISL_FORMAT_HIZ,
 -                 .width = surf->logical_level0_px.width,
 -                 .height = surf->logical_level0_px.height,
--                 .depth = 1,
-+                 .width = width,
-+                 .height = height,
-+                 .depth = surf->logical_level0_px.depth,
+-                 .depth = surf->logical_level0_px.depth,
++		 .width = width,
++		 .height = height,
++		 .depth = surf->logical_level0_px.depth,
                   .levels = surf->levels,
                   .array_len = surf->logical_level0_px.array_len,
--                 /* On SKL+, HiZ is always single-sampled */
--                 .samples = ISL_DEV_GEN(dev) >= 9 ? 1 : surf->samples,
-+                 .samples = 1,
-                  .usage = ISL_SURF_USAGE_HIZ_BIT,
-                  .tiling_flags = ISL_TILING_HIZ_BIT);
- }
+                  .samples = samples,
 diff --git a/src/intel/vulkan/anv_private.h b/src/intel/vulkan/anv_private.h
 index 443c31f..7e08786 100644
 --- a/src/intel/vulkan/anv_private.h
