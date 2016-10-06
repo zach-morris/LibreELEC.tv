@@ -41,7 +41,8 @@ OEM_APPS_COMMON=" \
   SABnzbd \
   tcpdump \
   transmission \
-  unfs3"
+  unfs3 \
+  vim"
 
 OEM_APPS_GENERIC=" \
   tigervnc \
