@@ -17,7 +17,7 @@
 ################################################################################
 
 PKG_NAME="mesa"
-PKG_VERSION="f7659e0"
+PKG_VERSION="185be15"
 PKG_REV="1"
 PKG_ARCH="any"
 PKG_LICENSE="OSS"
@@ -53,7 +53,8 @@ fi
 XA_CONFIG="--disable-xa"
 for drv in $GRAPHIC_DRIVERS; do
   [ "$drv" = "vmware" ] && XA_CONFIG="--enable-xa"
-  [ "$drv" = "i965" ] && VULKAN="--with-vulkan-drivers=intel"
+  [ "$drv" = "i965" ] && VULKAN="$VULKAN,intel"
+  [ "$drv" = "radeonsi" ] && VULKAN="$VULKAN,radeon"
 done
 
 if [ "$OPENGLES_SUPPORT" = "yes" ]; then
@@ -107,7 +108,7 @@ PKG_CONFIGURE_OPTS_TARGET="CC_FOR_BUILD=$HOST_CC \
                            --with-osmesa-lib-name=OSMesa \
                            --with-gallium-drivers=$GALLIUM_DRIVERS \
                            --with-dri-drivers=$DRI_DRIVERS \
-                           $VULKAN \
+                           --with-vulkan-drivers=`echo $VULKAN | sed s/^,//` \
                            --with-sysroot=$SYSROOT_PREFIX"
 
 pre_configure_target() {
