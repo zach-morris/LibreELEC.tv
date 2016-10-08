@@ -1,0 +1,27 @@
+diff --git a/1080i/Home.xml b/1080i/Home.xml
+--- a/1080i/Home.xml
++++ b/1080i/Home.xml
+@@ -1219,17 +1219,17 @@
+ 						<param name="label" value="$LOCALIZE[21417]" />
+ 					</include>
+ 					<include content="BottomMainMenuItem">
++						<param name="control_id" value="801" />
++						<param name="onclick" value="RunAddon(service.libreelec.settings)" />
++						<param name="icon" value="icons/le.png" />
++						<param name="label" value="@DISTRONAME@" />
++					</include>
++					<include content="BottomMainMenuItem">
+ 						<param name="control_id" value="803" />
+ 						<param name="onclick" value="ActivateWindow(favourites)" />
+ 						<param name="icon" value="icons/favourites.png" />
+ 						<param name="label" value="$LOCALIZE[10134]" />
+ 					</include>
+-					<include content="BottomMainMenuItem">
+-						<param name="control_id" value="801" />
+-						<param name="onclick" value="ActivateWindow(filemanager)" />
+-						<param name="icon" value="icons/filemanager.png" />
+-						<param name="label" value="$LOCALIZE[10003]" />
+-					</include>
+ 				</control>
+ 			</control>
+ 			<control type="group">
