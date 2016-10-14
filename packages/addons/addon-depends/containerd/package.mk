@@ -36,6 +36,9 @@ pre_make_target() {
     x86_64)
       export GOARCH=amd64
       ;;
+    i386)
+      export GOARCH=386
+      ;;
     arm)
       export GOARCH=arm
 
