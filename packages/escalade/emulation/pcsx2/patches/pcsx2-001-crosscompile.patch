@@ -1,0 +1,13 @@
+--- a/cmake/SearchForStuff.cmake	2016-10-10 22:34:46.476298760 +0200
++++ b/cmake/SearchForStuff.cmake	2016-10-10 22:34:23.366064352 +0200
+@@ -47,8 +47,8 @@
+         if (Fedora AND EXISTS "/usr/bin/wx-config-3.0")
+             set(wxWidgets_CONFIG_EXECUTABLE "/usr/bin/wx-config-3.0")
+         endif()
+-        if (EXISTS "/usr/bin/wx-config32-3.0")
+-            set(wxWidgets_CONFIG_EXECUTABLE "/usr/bin/wx-config32-3.0")
++	if (EXISTS "${CMAKE_FIND_ROOT_PATH}/usr/bin/wx-config")
++		set(wxWidgets_CONFIG_EXECUTABLE "${CMAKE_FIND_ROOT_PATH}/usr/bin/wx-config")
+         endif()
+     endif()
+ else()
