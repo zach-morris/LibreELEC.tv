@@ -83,6 +83,10 @@ OEM_EMU_GENERIC=" \
   reicast-libretro \
   unclutter"
 
+if [ "$TARGET_ARCH" = "i386" ]; then
+  OEM_EMU_GENERIC="$OEM_EMU_GENERIC pcsx2 yabause-libretro"
+fi
+
 OEM_EMU_RPI=" \
   uae4arm \
   pcsx_rearmed-libretro \
