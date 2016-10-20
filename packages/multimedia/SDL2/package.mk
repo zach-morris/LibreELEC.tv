@@ -17,7 +17,7 @@
 ################################################################################
 
 PKG_NAME="SDL2"
-PKG_VERSION="069b980"
+PKG_VERSION="ec3b66b"
 PKG_REV="1"
 PKG_ARCH="any"
 PKG_LICENSE="GPL"
