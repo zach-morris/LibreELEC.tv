@@ -33,7 +33,6 @@ PKG_AUTORECONF="no"
 
 OEM_APPS_COMMON=" \
   addons-to-image \
-  docker-containers \
   docker-system \
   NzbDrone \
   plexmediaserver-script \
@@ -47,6 +46,7 @@ OEM_APPS_COMMON=" \
 
 OEM_APPS_GENERIC=" \
   google-chrome \
+  spotify \
   tigervnc-system \
   qemu"
 
