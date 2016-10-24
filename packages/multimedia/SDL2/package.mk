@@ -17,7 +17,7 @@
 ################################################################################
 
 PKG_NAME="SDL2"
-PKG_VERSION="ec3b66b"
+PKG_VERSION="f742129"
 PKG_REV="1"
 PKG_ARCH="any"
 PKG_LICENSE="GPL"
@@ -49,15 +49,11 @@ fi
 
 if [[ "$PROJECT" =~ "RPi" ]]; then
   PKG_CMAKE_OPTS_TARGET="$PKG_CMAKE_OPTS_TARGET -DVIDEO_X11=OFF"
+  PKG_DEPENDS_TARGET="$PKG_DEPENDS_TARGET bcm2835-driver"
 fi
 
 post_unpack() {
   mv $BUILD/SDL-mirror-$PKG_VERSION* $BUILD/$PKG_NAME-$PKG_VERSION
-}
-
-pre_make_target() {
-# dont build parallel
-  MAKEFLAGS=-j1
 }
 
 post_makeinstall_target() {
