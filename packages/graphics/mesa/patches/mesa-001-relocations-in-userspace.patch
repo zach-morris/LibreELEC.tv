@@ -1,0 +1,659 @@
+diff --git a/src/intel/vulkan/anv_batch_chain.c b/src/intel/vulkan/anv_batch_chain.c
+index dfa9abf..b8e1eed 100644
+--- a/src/intel/vulkan/anv_batch_chain.c
++++ b/src/intel/vulkan/anv_batch_chain.c
+@@ -940,8 +940,6 @@ static void
+ anv_cmd_buffer_process_relocs(struct anv_cmd_buffer *cmd_buffer,
+                               struct anv_reloc_list *list)
+ {
+-   struct anv_bo *bo;
+-
+    /* If the kernel supports I915_EXEC_NO_RELOC, it will compare offset in
+     * struct drm_i915_gem_exec_object2 against the bos current offset and if
+     * all bos haven't moved it will skip relocation processing alltogether.
+@@ -950,22 +948,8 @@ anv_cmd_buffer_process_relocs(struct anv_cmd_buffer *cmd_buffer,
+     * to make sure all relocs use the same presumed offset.
+     */
+ 
+-   for (size_t i = 0; i < list->num_relocs; i++) {
+-      bo = list->reloc_bos[i];
+-      if (bo->offset != list->relocs[i].presumed_offset)
+-         cmd_buffer->execbuf2.need_reloc = true;
+-
+-      list->relocs[i].target_handle = bo->index;
+-   }
+-}
+-
+-static uint64_t
+-read_reloc(const struct anv_device *device, const void *p)
+-{
+-   if (device->info.gen >= 8)
+-      return *(uint64_t *)p;
+-   else
+-      return *(uint32_t *)p;
++   for (size_t i = 0; i < list->num_relocs; i++)
++      list->relocs[i].target_handle = list->reloc_bos[i]->index;
+ }
+ 
+ static void
+@@ -978,38 +962,29 @@ write_reloc(const struct anv_device *device, void *p, uint64_t v)
+ }
+ 
+ static void
+-adjust_relocations_from_block_pool(struct anv_block_pool *pool,
++adjust_relocations_from_state_pool(struct anv_block_pool *pool,
+                                    struct anv_reloc_list *relocs)
+ {
+    for (size_t i = 0; i < relocs->num_relocs; i++) {
+-      /* In general, we don't know how stale the relocated value is.  It
+-       * may have been used last time or it may not.  Since we don't want
+-       * to stomp it while the GPU may be accessing it, we haven't updated
+-       * it anywhere else in the code.  Instead, we just set the presumed
+-       * offset to what it is now based on the delta and the data in the
+-       * block pool.  Then the kernel will update it for us if needed.
+-       */
+-      assert(relocs->relocs[i].offset < pool->state.end);
+-      const void *p = pool->map + relocs->relocs[i].offset;
+-
+-      /* We're reading back the relocated value from potentially incoherent
+-       * memory here. However, any change to the value will be from the kernel
+-       * writing out relocations, which will keep the CPU cache up to date.
+-       */
+-      relocs->relocs[i].presumed_offset =
+-         read_reloc(pool->device, p) - relocs->relocs[i].delta;
+-
+       /* All of the relocations from this block pool to other BO's should
+        * have been emitted relative to the surface block pool center.  We
+        * need to add the center offset to make them relative to the
+        * beginning of the actual GEM bo.
+        */
+       relocs->relocs[i].offset += pool->center_bo_offset;
++
++      /* Since surface states are shared between command buffers and we don't
++       * know what order they will be submitted to the kernel, we don't know
++       * what address is actually written in the surface state object at any
++       * given time.  The only option is to set a bogus presumed offset and
++       * let relocations do their job.
++       */
++      relocs->relocs[i].presumed_offset = -1;
+    }
+ }
+ 
+ static void
+-adjust_relocations_to_block_pool(struct anv_block_pool *pool,
++adjust_relocations_to_state_pool(struct anv_block_pool *pool,
+                                  struct anv_bo *from_bo,
+                                  struct anv_reloc_list *relocs,
+                                  uint32_t *last_pool_center_bo_offset)
+@@ -1055,9 +1030,8 @@ anv_cmd_buffer_prepare_execbuf(struct anv_cmd_buffer *cmd_buffer)
+       &cmd_buffer->device->surface_state_block_pool;
+ 
+    cmd_buffer->execbuf2.bo_count = 0;
+-   cmd_buffer->execbuf2.need_reloc = false;
+ 
+-   adjust_relocations_from_block_pool(ss_pool, &cmd_buffer->surface_relocs);
++   adjust_relocations_from_state_pool(ss_pool, &cmd_buffer->surface_relocs);
+    anv_cmd_buffer_add_bo(cmd_buffer, &ss_pool->bo, &cmd_buffer->surface_relocs);
+ 
+    /* First, we walk over all of the bos we've seen and add them and their
+@@ -1065,7 +1039,7 @@ anv_cmd_buffer_prepare_execbuf(struct anv_cmd_buffer *cmd_buffer)
+     */
+    struct anv_batch_bo **bbo;
+    u_vector_foreach(bbo, &cmd_buffer->seen_bbos) {
+-      adjust_relocations_to_block_pool(ss_pool, &(*bbo)->bo, &(*bbo)->relocs,
++      adjust_relocations_to_state_pool(ss_pool, &(*bbo)->bo, &(*bbo)->relocs,
+                                        &(*bbo)->last_ss_pool_bo_offset);
+ 
+       anv_cmd_buffer_add_bo(cmd_buffer, &(*bbo)->bo, &(*bbo)->relocs);
+@@ -1127,7 +1101,4 @@ anv_cmd_buffer_prepare_execbuf(struct anv_cmd_buffer *cmd_buffer)
+       .rsvd1 = cmd_buffer->device->context_id,
+       .rsvd2 = 0,
+    };
+-
+-   if (!cmd_buffer->execbuf2.need_reloc)
+-      cmd_buffer->execbuf2.execbuf.flags |= I915_EXEC_NO_RELOC;
+ }
+diff --git a/src/intel/vulkan/anv_private.h b/src/intel/vulkan/anv_private.h
+index 3fe9d7d..7f5f144 100644
+--- a/src/intel/vulkan/anv_private.h
++++ b/src/intel/vulkan/anv_private.h
+@@ -1166,8 +1166,6 @@ struct anv_cmd_buffer {
+ 
+       /* Allocated length of the 'objects' and 'bos' arrays */
+       uint32_t                                  array_length;
+-
+-      bool                                      need_reloc;
+    } execbuf2;
+ 
+    /* Serial for tracking buffer completion */
+diff --git a/src/intel/vulkan/anv_allocator.c b/src/intel/vulkan/anv_allocator.c
+index 36cabd7..b846a62 100644
+--- a/src/intel/vulkan/anv_allocator.c
++++ b/src/intel/vulkan/anv_allocator.c
+@@ -253,10 +253,7 @@ anv_block_pool_init(struct anv_block_pool *pool,
+    assert(util_is_power_of_two(block_size));
+ 
+    pool->device = device;
+-   pool->bo.gem_handle = 0;
+-   pool->bo.offset = 0;
+-   pool->bo.size = 0;
+-   pool->bo.is_winsys_bo = false;
++   anv_bo_init(&pool->bo, 0, 0);
+    pool->block_size = block_size;
+    pool->free_list = ANV_FREE_LIST_EMPTY;
+    pool->back_free_list = ANV_FREE_LIST_EMPTY;
+@@ -463,10 +460,8 @@ anv_block_pool_grow(struct anv_block_pool *pool, struct anv_block_state *state)
+     * values back into pool. */
+    pool->map = map + center_bo_offset;
+    pool->center_bo_offset = center_bo_offset;
+-   pool->bo.gem_handle = gem_handle;
+-   pool->bo.size = size;
++   anv_bo_init(&pool->bo, gem_handle, size);
+    pool->bo.map = map;
+-   pool->bo.index = 0;
+ 
+ done:
+    pthread_mutex_unlock(&pool->device->mutex);
+diff --git a/src/intel/vulkan/anv_device.c b/src/intel/vulkan/anv_device.c
+index 37615ef..12bf4c8 100644
+--- a/src/intel/vulkan/anv_device.c
++++ b/src/intel/vulkan/anv_device.c
+@@ -1136,15 +1136,11 @@ VkResult anv_DeviceWaitIdle(
+ VkResult
+ anv_bo_init_new(struct anv_bo *bo, struct anv_device *device, uint64_t size)
+ {
+-   bo->gem_handle = anv_gem_create(device, size);
+-   if (!bo->gem_handle)
++   uint32_t gem_handle = anv_gem_create(device, size);
++   if (!gem_handle)
+       return vk_error(VK_ERROR_OUT_OF_DEVICE_MEMORY);
+ 
+-   bo->map = NULL;
+-   bo->index = 0;
+-   bo->offset = 0;
+-   bo->size = size;
+-   bo->is_winsys_bo = false;
++   anv_bo_init(bo, gem_handle, size);
+ 
+    return VK_SUCCESS;
+ }
+diff --git a/src/intel/vulkan/anv_intel.c b/src/intel/vulkan/anv_intel.c
+index 3e1cc3f..1c50e2b 100644
+--- a/src/intel/vulkan/anv_intel.c
++++ b/src/intel/vulkan/anv_intel.c
+@@ -49,16 +49,15 @@ VkResult anv_CreateDmaBufImageINTEL(
+    if (mem == NULL)
+       return vk_error(VK_ERROR_OUT_OF_HOST_MEMORY);
+ 
+-   mem->bo.gem_handle = anv_gem_fd_to_handle(device, pCreateInfo->fd);
+-   if (!mem->bo.gem_handle) {
++   uint32_t gem_handle = anv_gem_fd_to_handle(device, pCreateInfo->fd);
++   if (!gem_handle) {
+       result = vk_error(VK_ERROR_OUT_OF_DEVICE_MEMORY);
+       goto fail;
+    }
+ 
+-   mem->bo.map = NULL;
+-   mem->bo.index = 0;
+-   mem->bo.offset = 0;
+-   mem->bo.size = pCreateInfo->strideInBytes * pCreateInfo->extent.height;
++   uint64_t size = pCreateInfo->strideInBytes * pCreateInfo->extent.height;
++
++   anv_bo_init(&mem->bo, gem_handle, size);
+ 
+    anv_image_create(_device,
+       &(struct anv_image_create_info) {
+diff --git a/src/intel/vulkan/anv_private.h b/src/intel/vulkan/anv_private.h
+index 7f5f144..42b0423 100644
+--- a/src/intel/vulkan/anv_private.h
++++ b/src/intel/vulkan/anv_private.h
+@@ -265,6 +265,17 @@ struct anv_bo {
+    bool is_winsys_bo;
+ };
+ 
++static inline void
++anv_bo_init(struct anv_bo *bo, uint32_t gem_handle, uint64_t size)
++{
++   bo->gem_handle = gem_handle;
++   bo->index = 0;
++   bo->offset = 0;
++   bo->size = size;
++   bo->map = NULL;
++   bo->is_winsys_bo = false;
++}
++
+ /* Represents a lock-free linked list of "free" things.  This is used by
+  * both the block pool and the state pools.  Unfortunately, in order to
+  * solve the ABA problem, we can't use a single uint32_t head.
+diff --git a/src/intel/vulkan/anv_allocator.c b/src/intel/vulkan/anv_allocator.c
+index b846a62..e7cad45 100644
+--- a/src/intel/vulkan/anv_allocator.c
++++ b/src/intel/vulkan/anv_allocator.c
+@@ -888,9 +888,9 @@ anv_scratch_pool_finish(struct anv_device *device, struct anv_scratch_pool *pool
+ {
+    for (unsigned s = 0; s < MESA_SHADER_STAGES; s++) {
+       for (unsigned i = 0; i < 16; i++) {
+-         struct anv_bo *bo = &pool->bos[i][s];
+-         if (bo->size > 0)
+-            anv_gem_close(device, bo->gem_handle);
++         struct anv_scratch_bo *bo = &pool->bos[i][s];
++         if (bo->exists > 0)
++            anv_gem_close(device, bo->bo.gem_handle);
+       }
+    }
+ }
+@@ -905,70 +905,59 @@ anv_scratch_pool_alloc(struct anv_device *device, struct anv_scratch_pool *pool,
+    unsigned scratch_size_log2 = ffs(per_thread_scratch / 2048);
+    assert(scratch_size_log2 < 16);
+ 
+-   struct anv_bo *bo = &pool->bos[scratch_size_log2][stage];
++   struct anv_scratch_bo *bo = &pool->bos[scratch_size_log2][stage];
+ 
+-   /* From now on, we go into a critical section.  In order to remain
+-    * thread-safe, we use the bo size as a lock.  A value of 0 means we don't
+-    * have a valid BO yet.  A value of 1 means locked.  A value greater than 1
+-    * means we have a bo of the given size.
+-    */
++   /* We can use "exists" to shortcut and ignore the critical section */
++   if (bo->exists)
++      return &bo->bo;
+ 
+-   if (bo->size > 1)
+-      return bo;
+-
+-   uint64_t size = __sync_val_compare_and_swap(&bo->size, 0, 1);
+-   if (size == 0) {
+-      /* We own the lock.  Allocate a buffer */
+-
+-      const struct anv_physical_device *physical_device =
+-         &device->instance->physicalDevice;
+-      const struct gen_device_info *devinfo = &physical_device->info;
+-
+-      /* WaCSScratchSize:hsw
+-       *
+-       * Haswell's scratch space address calculation appears to be sparse
+-       * rather than tightly packed. The Thread ID has bits indicating which
+-       * subslice, EU within a subslice, and thread within an EU it is.
+-       * There's a maximum of two slices and two subslices, so these can be
+-       * stored with a single bit. Even though there are only 10 EUs per
+-       * subslice, this is stored in 4 bits, so there's an effective maximum
+-       * value of 16 EUs. Similarly, although there are only 7 threads per EU,
+-       * this is stored in a 3 bit number, giving an effective maximum value
+-       * of 8 threads per EU.
+-       *
+-       * This means that we need to use 16 * 8 instead of 10 * 7 for the
+-       * number of threads per subslice.
+-       */
+-      const unsigned subslices = MAX2(physical_device->subslice_total, 1);
+-      const unsigned scratch_ids_per_subslice =
+-         device->info.is_haswell ? 16 * 8 : devinfo->max_cs_threads;
++   pthread_mutex_lock(&device->mutex);
++
++   __sync_synchronize();
++   if (bo->exists)
++      return &bo->bo;
+ 
+-      uint32_t max_threads[] = {
+-         [MESA_SHADER_VERTEX]           = devinfo->max_vs_threads,
+-         [MESA_SHADER_TESS_CTRL]        = devinfo->max_tcs_threads,
+-         [MESA_SHADER_TESS_EVAL]        = devinfo->max_tes_threads,
+-         [MESA_SHADER_GEOMETRY]         = devinfo->max_gs_threads,
+-         [MESA_SHADER_FRAGMENT]         = devinfo->max_wm_threads,
+-         [MESA_SHADER_COMPUTE]          = scratch_ids_per_subslice * subslices,
+-      };
++   const struct anv_physical_device *physical_device =
++      &device->instance->physicalDevice;
++   const struct gen_device_info *devinfo = &physical_device->info;
++
++   /* WaCSScratchSize:hsw
++    *
++    * Haswell's scratch space address calculation appears to be sparse
++    * rather than tightly packed. The Thread ID has bits indicating which
++    * subslice, EU within a subslice, and thread within an EU it is.
++    * There's a maximum of two slices and two subslices, so these can be
++    * stored with a single bit. Even though there are only 10 EUs per
++    * subslice, this is stored in 4 bits, so there's an effective maximum
++    * value of 16 EUs. Similarly, although there are only 7 threads per EU,
++    * this is stored in a 3 bit number, giving an effective maximum value
++    * of 8 threads per EU.
++    *
++    * This means that we need to use 16 * 8 instead of 10 * 7 for the
++    * number of threads per subslice.
++    */
++   const unsigned subslices = MAX2(physical_device->subslice_total, 1);
++   const unsigned scratch_ids_per_subslice =
++      device->info.is_haswell ? 16 * 8 : devinfo->max_cs_threads;
+ 
+-      size = per_thread_scratch * max_threads[stage];
++   uint32_t max_threads[] = {
++      [MESA_SHADER_VERTEX]           = devinfo->max_vs_threads,
++      [MESA_SHADER_TESS_CTRL]        = devinfo->max_tcs_threads,
++      [MESA_SHADER_TESS_EVAL]        = devinfo->max_tes_threads,
++      [MESA_SHADER_GEOMETRY]         = devinfo->max_gs_threads,
++      [MESA_SHADER_FRAGMENT]         = devinfo->max_wm_threads,
++      [MESA_SHADER_COMPUTE]          = scratch_ids_per_subslice * subslices,
++   };
+ 
+-      struct anv_bo new_bo;
+-      anv_bo_init_new(&new_bo, device, size);
++   uint32_t size = per_thread_scratch * max_threads[stage];
+ 
+-      bo->gem_handle = new_bo.gem_handle;
++   anv_bo_init_new(&bo->bo, device, size);
+ 
+-      /* Set the size last because we use it as a lock */
+-      __sync_synchronize();
+-      bo->size = size;
++   /* Set the exists last because it may be read by other threads */
++   __sync_synchronize();
++   bo->exists = true;
+ 
+-      futex_wake((uint32_t *)&bo->size, INT_MAX);
+-   } else {
+-      /* Someone else got here first */
+-      while (bo->size == 1)
+-         futex_wait((uint32_t *)&bo->size, 1);
+-   }
++   pthread_mutex_unlock(&device->mutex);
+ 
+-   return bo;
++   return &bo->bo;
+ }
+diff --git a/src/intel/vulkan/anv_private.h b/src/intel/vulkan/anv_private.h
+index 42b0423..c66b5b1 100644
+--- a/src/intel/vulkan/anv_private.h
++++ b/src/intel/vulkan/anv_private.h
+@@ -448,9 +448,14 @@ VkResult anv_bo_pool_alloc(struct anv_bo_pool *pool, struct anv_bo *bo,
+                            uint32_t size);
+ void anv_bo_pool_free(struct anv_bo_pool *pool, const struct anv_bo *bo);
+ 
++struct anv_scratch_bo {
++   bool exists;
++   struct anv_bo bo;
++};
++
+ struct anv_scratch_pool {
+    /* Indexed by Per-Thread Scratch Space number (the hardware value) and stage */
+-   struct anv_bo bos[16][MESA_SHADER_STAGES];
++   struct anv_scratch_bo bos[16][MESA_SHADER_STAGES];
+ };
+ 
+ void anv_scratch_pool_init(struct anv_device *device,
+diff --git a/src/intel/vulkan/anv_private.h b/src/intel/vulkan/anv_private.h
+index c66b5b1..b3c9200 100644
+--- a/src/intel/vulkan/anv_private.h
++++ b/src/intel/vulkan/anv_private.h
+@@ -270,7 +270,7 @@ anv_bo_init(struct anv_bo *bo, uint32_t gem_handle, uint64_t size)
+ {
+    bo->gem_handle = gem_handle;
+    bo->index = 0;
+-   bo->offset = 0;
++   bo->offset = -1;
+    bo->size = size;
+    bo->map = NULL;
+    bo->is_winsys_bo = false;
+diff --git a/src/intel/vulkan/anv_device.c b/src/intel/vulkan/anv_device.c
+index 12bf4c8..bc958cf 100644
+--- a/src/intel/vulkan/anv_device.c
++++ b/src/intel/vulkan/anv_device.c
+@@ -770,7 +770,7 @@ anv_device_submit_simple_batch(struct anv_device *device,
+ {
+    struct drm_i915_gem_execbuffer2 execbuf;
+    struct drm_i915_gem_exec_object2 exec2_objects[1];
+-   struct anv_bo bo;
++   struct anv_bo bo, *exec_bos[1];
+    VkResult result = VK_SUCCESS;
+    uint32_t size;
+    int64_t timeout;
+@@ -786,6 +786,7 @@ anv_device_submit_simple_batch(struct anv_device *device,
+    if (!device->info.has_llc)
+       anv_clflush_range(bo.map, size);
+ 
++   exec_bos[0] = &bo;
+    exec2_objects[0].handle = bo.gem_handle;
+    exec2_objects[0].relocation_count = 0;
+    exec2_objects[0].relocs_ptr = 0;
+@@ -809,12 +810,9 @@ anv_device_submit_simple_batch(struct anv_device *device,
+    execbuf.rsvd1 = device->context_id;
+    execbuf.rsvd2 = 0;
+ 
+-   ret = anv_gem_execbuffer(device, &execbuf);
+-   if (ret != 0) {
+-      /* We don't know the real error. */
+-      result = vk_errorf(VK_ERROR_DEVICE_LOST, "execbuf2 failed: %m");
++   result = anv_device_execbuf(device, &execbuf, exec_bos);
++   if (result != VK_SUCCESS)
+       goto fail;
+-   }
+ 
+    timeout = INT64_MAX;
+    ret = anv_gem_wait(device, bo.gem_handle, &timeout);
+@@ -1070,6 +1068,24 @@ void anv_GetDeviceQueue(
+    *pQueue = anv_queue_to_handle(&device->queue);
+ }
+ 
++VkResult
++anv_device_execbuf(struct anv_device *device,
++                   struct drm_i915_gem_execbuffer2 *execbuf,
++                   struct anv_bo **execbuf_bos)
++{
++   int ret = anv_gem_execbuffer(device, execbuf);
++   if (ret != 0) {
++      /* We don't know the real error. */
++      return vk_errorf(VK_ERROR_DEVICE_LOST, "execbuf2 failed: %m");
++   }
++
++   struct drm_i915_gem_exec_object2 *objects = (void *)execbuf->buffers_ptr;
++   for (uint32_t k = 0; k < execbuf->buffer_count; k++)
++      execbuf_bos[k]->offset = objects[k].offset;
++
++   return VK_SUCCESS;
++}
++
+ VkResult anv_QueueSubmit(
+     VkQueue                                     _queue,
+     uint32_t                                    submitCount,
+@@ -1079,7 +1095,7 @@ VkResult anv_QueueSubmit(
+    ANV_FROM_HANDLE(anv_queue, queue, _queue);
+    ANV_FROM_HANDLE(anv_fence, fence, _fence);
+    struct anv_device *device = queue->device;
+-   int ret;
++   VkResult result = VK_SUCCESS;
+ 
+    for (uint32_t i = 0; i < submitCount; i++) {
+       for (uint32_t j = 0; j < pSubmits[i].commandBufferCount; j++) {
+@@ -1087,23 +1103,18 @@ VkResult anv_QueueSubmit(
+                          pSubmits[i].pCommandBuffers[j]);
+          assert(cmd_buffer->level == VK_COMMAND_BUFFER_LEVEL_PRIMARY);
+ 
+-         ret = anv_gem_execbuffer(device, &cmd_buffer->execbuf2.execbuf);
+-         if (ret != 0) {
+-            /* We don't know the real error. */
+-            return vk_errorf(VK_ERROR_DEVICE_LOST, "execbuf2 failed: %m");
+-         }
+-
+-         for (uint32_t k = 0; k < cmd_buffer->execbuf2.bo_count; k++)
+-            cmd_buffer->execbuf2.bos[k]->offset = cmd_buffer->execbuf2.objects[k].offset;
++         result = anv_device_execbuf(device, &cmd_buffer->execbuf2.execbuf,
++                                     cmd_buffer->execbuf2.bos);
++         if (result != VK_SUCCESS)
++            return result;
+       }
+    }
+ 
+    if (fence) {
+-      ret = anv_gem_execbuffer(device, &fence->execbuf);
+-      if (ret != 0) {
+-         /* We don't know the real error. */
+-         return vk_errorf(VK_ERROR_DEVICE_LOST, "execbuf2 failed: %m");
+-      }
++      struct anv_bo *fence_bo = &fence->bo;
++      result = anv_device_execbuf(device, &fence->execbuf, &fence_bo);
++      if (result != VK_SUCCESS)
++         return result;
+    }
+ 
+    return VK_SUCCESS;
+diff --git a/src/intel/vulkan/anv_private.h b/src/intel/vulkan/anv_private.h
+index b3c9200..d88e27c 100644
+--- a/src/intel/vulkan/anv_private.h
++++ b/src/intel/vulkan/anv_private.h
+@@ -581,6 +581,10 @@ void anv_device_get_cache_uuid(void *uuid);
+ void anv_device_init_blorp(struct anv_device *device);
+ void anv_device_finish_blorp(struct anv_device *device);
+ 
++VkResult anv_device_execbuf(struct anv_device *device,
++                            struct drm_i915_gem_execbuffer2 *execbuf,
++                            struct anv_bo **execbuf_bos);
++
+ void* anv_gem_mmap(struct anv_device *device,
+                    uint32_t gem_handle, uint64_t offset, uint64_t size, uint32_t flags);
+ void anv_gem_munmap(void *p, uint64_t size);
+diff --git a/src/intel/vulkan/anv_device.c b/src/intel/vulkan/anv_device.c
+index bc958cf..36b5e66 100644
+--- a/src/intel/vulkan/anv_device.c
++++ b/src/intel/vulkan/anv_device.c
+@@ -1068,6 +1068,105 @@ void anv_GetDeviceQueue(
+    *pQueue = anv_queue_to_handle(&device->queue);
+ }
+ 
++static void
++write_reloc(const struct anv_device *device, void *p, uint64_t v)
++{
++   unsigned reloc_size = 0;
++   if (device->info.gen >= 8) {
++      /* From the Broadwell PRM Vol. 2a, MI_LOAD_REGISTER_MEM::MemoryAddress:
++       *
++       *    "This field specifies the address of the memory location where the
++       *    register value specified in the DWord above will read from. The
++       *    address specifies the DWord location of the data. Range =
++       *    GraphicsVirtualAddress[63:2] for a DWord register GraphicsAddress
++       *    [63:48] are ignored by the HW and assumed to be in correct
++       *    canonical form [63:48] == [47]."
++       */
++      reloc_size = sizeof(uint64_t);
++      *(uint64_t *)p = (((int64_t)v) << 8) >> 8;
++   } else {
++      reloc_size = sizeof(uint32_t);
++      *(uint32_t *)p = v;
++   }
++
++   if (!device->info.has_llc)
++      anv_clflush_range(p, reloc_size);
++}
++
++static void
++anv_reloc_list_apply(struct anv_reloc_list *list,
++                     struct anv_device *device, struct anv_bo *bo)
++{
++   for (size_t i = 0; i < list->num_relocs; i++) {
++      void *p = bo->map + list->relocs[i].offset;
++
++      struct anv_bo *target_bo = list->reloc_bos[i];
++      write_reloc(device, p, target_bo->offset + list->relocs[i].delta);
++      list->relocs[i].presumed_offset = bo->offset;
++   }
++}
++
++/**
++ * This function applies the relocation for a command buffer and writes the
++ * actual addresses into the buffers as per what we were told by the kernel on
++ * the previous execbuf2 call.  This should be safe to do because, for each
++ * relocated address, we have two cases:
++ *
++ *  1) The target BO is inactive (as seen by the kernel).  In this case, it is
++ *     not in use by the GPU so updating the address is 100% ok.  It won't be
++ *     in-use by the GPU (from our context) again until the next execbuf2
++ *     happens.  If the kernel decides to move it in the next execbuf2, it
++ *     will have to do the relocations itself, but that's ok because it should
++ *     have all of the information needed to do so.
++ *
++ *  2) The target BO is active (as seen by the kernel).  In this case, it
++ *     hasn't moved since the last execbuffer2 call because GTT shuffling
++ *     *only* happens inside the execbuffer2 ioctl.  Since the target BO
++ *     hasn't moved, our anv_bo::offset exactly matches the BO's GTT address
++ *     and the relocated value we are writing into the BO will be the same as
++ *     the value that is already there.
++ *
++ *     There is also a possibility that the target BO is active but the exact
++ *     RENDER_SURFACE_STATE object we are writing the relocation into isn't in
++ *     use.  In this case, the address currently in the RENDER_SURFACE_STATE
++ *     may be stale but it's still safe to write the relocation because that
++ *     particular RENDER_SURFACE_STATE object isn't in-use by the GPU and
++ *     won't be until the next execbuf2 call.
++ *
++ * By doing relocations on the CPU, we can tell the kernel that it doesn't
++ * need to bother.  We want to do this because the surface state buffer is
++ * used by every command buffer so, if the kernel does the relocations, it
++ * will always be busy and the kernel will always stall.  This is also
++ * probably the fastest mechanism for doing relocations since the kernel would
++ * have to make a full copy of all the relocations lists.
++ */
++static void
++relocate_cmd_buffer(struct anv_cmd_buffer *cmd_buffer)
++{
++   for (uint32_t i = 0; i < cmd_buffer->execbuf2.bo_count; i++) {
++      if (cmd_buffer->execbuf2.bos[i]->offset == (uint64_t)-1)
++         return;
++   }
++
++   anv_reloc_list_apply(&cmd_buffer->surface_relocs,
++                        cmd_buffer->device,
++                        &cmd_buffer->device->surface_state_block_pool.bo);
++
++   struct anv_batch_bo **bbo;
++   u_vector_foreach(bbo, &cmd_buffer->seen_bbos) {
++      anv_reloc_list_apply(&(*bbo)->relocs,
++                           cmd_buffer->device, &(*bbo)->bo);
++   }
++
++   for (uint32_t i = 0; i < cmd_buffer->execbuf2.bo_count; i++) {
++      struct anv_bo *bo = cmd_buffer->execbuf2.bos[i];
++
++      cmd_buffer->execbuf2.objects[i].offset = bo->offset;
++   }
++
++   cmd_buffer->execbuf2.execbuf.flags |= I915_EXEC_NO_RELOC;
++}
++
+ VkResult
+ anv_device_execbuf(struct anv_device *device,
+                    struct drm_i915_gem_execbuffer2 *execbuf,
+@@ -1097,16 +1196,20 @@ VkResult anv_QueueSubmit(
+    struct anv_device *device = queue->device;
+    VkResult result = VK_SUCCESS;
+ 
++   pthread_mutex_lock(&device->mutex);
++
+    for (uint32_t i = 0; i < submitCount; i++) {
+       for (uint32_t j = 0; j < pSubmits[i].commandBufferCount; j++) {
+          ANV_FROM_HANDLE(anv_cmd_buffer, cmd_buffer,
+                          pSubmits[i].pCommandBuffers[j]);
+          assert(cmd_buffer->level == VK_COMMAND_BUFFER_LEVEL_PRIMARY);
+ 
++         relocate_cmd_buffer(cmd_buffer);
++
+          result = anv_device_execbuf(device, &cmd_buffer->execbuf2.execbuf,
+                                      cmd_buffer->execbuf2.bos);
+          if (result != VK_SUCCESS)
+-            return result;
++            goto out;
+       }
+    }
+ 
+@@ -1114,10 +1217,13 @@ VkResult anv_QueueSubmit(
+       struct anv_bo *fence_bo = &fence->bo;
+       result = anv_device_execbuf(device, &fence->execbuf, &fence_bo);
+       if (result != VK_SUCCESS)
+-         return result;
++         goto out;
+    }
+ 
+-   return VK_SUCCESS;
++out:
++   pthread_mutex_unlock(&device->mutex);
++
++   return result;
+ }
+ 
+ VkResult anv_QueueWaitIdle(
