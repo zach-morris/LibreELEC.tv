@@ -86,6 +86,7 @@ OEM_EMU_GENERIC=" \
   unclutter"
 
 OEM_EMU_RPI=" \
+  gpsp \
   uae4arm \
   pcsx_rearmed-libretro \
   yabause-libretro"
