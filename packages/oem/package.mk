@@ -34,8 +34,11 @@ PKG_AUTORECONF="no"
 OEM_APPS_COMMON=" \
   addons-to-image \
   docker-system \
+  dstat \
+  htop \
   NzbDrone \
   plexmediaserver-script \
+  rsync \
   sdl-jstest \
   SABnzbd \
   tcpdump \
