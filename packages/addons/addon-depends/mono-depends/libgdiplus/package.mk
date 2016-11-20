@@ -36,6 +36,5 @@ PKG_CONFIGURE_OPTS_TARGET="--enable-shared \
                            --with-libjpeg  \
                            --with-libtiff"
 
-makeinstall_target() {
-  make install DESTDIR=$INSTALL
-}
+pre_configure_target() {
+  strip_gold
