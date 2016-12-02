@@ -63,7 +63,6 @@ OEM_EMU_COMMON=" \
   fuse-libretro \
   genesis-plus-gx-libretro \
   emulationstation \
-  mame2003-libretro \
   mgba-libretro \
   mupen64plus-libretro \
   glupen64-libretro \
@@ -84,6 +83,7 @@ OEM_EMU_GENERIC=" \
   craft-libretro \
   desmume-libretro \
   dolphin \
+  mame2014-libretro \
   fs-uae \
   ppsspp-libretro \
   reicast-libretro \
@@ -91,6 +91,7 @@ OEM_EMU_GENERIC=" \
 
 OEM_EMU_RPI=" \
   gpsp \
+  mame2003-libretro \
   uae4arm \
   pcsx_rearmed-libretro \
   yabause-libretro"
