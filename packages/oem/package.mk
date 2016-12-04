@@ -33,7 +33,6 @@ PKG_AUTORECONF="no"
 
 OEM_APPS_COMMON=" \
   addons-to-image \
-  docker-system \
   dstat \
   htop \
   nmon-system \
