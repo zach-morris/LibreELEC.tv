@@ -17,7 +17,7 @@
 ################################################################################
 
 PKG_NAME="mesa"
-PKG_VERSION="ec0a0a6"
+PKG_VERSION="9fe3f26"
 PKG_REV="1"
 PKG_ARCH="any"
 PKG_LICENSE="OSS"
