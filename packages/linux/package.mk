@@ -56,7 +56,7 @@ case "$LINUX" in
     PKG_DEPENDS_TARGET="$PKG_DEPENDS_TARGET imx6-status-led imx6-soc-fan irqbalanced"
     ;;
   drm-next)
-    PKG_VERSION="86a2672"
+    PKG_VERSION="f45701e"
     PKG_URL="https://cgit.freedesktop.org/drm-intel/snapshot/$PKG_VERSION.tar.bz2"
     PKG_SOURCE_DIR="$PKG_VERSION"
     PKG_PATCH_DIRS="drm-next"
