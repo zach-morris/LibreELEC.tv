@@ -20,24 +20,24 @@ diff --git a/include/GL/internal/dri_interface.h b/include/GL/internal/dri_inter
 index d0b1bc6..933277e 100644
 --- a/include/GL/internal/dri_interface.h
 +++ b/include/GL/internal/dri_interface.h
-@@ -1121,6 +1121,8 @@ struct __DRIdri2ExtensionRec {
- #define __DRI_IMAGE_FORMAT_XRGB2101010  0x1009
+@@ -1164,6 +1164,8 @@
  #define __DRI_IMAGE_FORMAT_ARGB2101010  0x100a
  #define __DRI_IMAGE_FORMAT_SARGB8       0x100b
-+#define __DRI_IMAGE_FORMAT_R16          0x100c
-+#define __DRI_IMAGE_FORMAT_GR16         0x100d
+ #define __DRI_IMAGE_FORMAT_ARGB1555     0x100c
++#define __DRI_IMAGE_FORMAT_R16          0x100d
++#define __DRI_IMAGE_FORMAT_GR16         0x100e
  
  #define __DRI_IMAGE_USE_SHARE		0x0001
  #define __DRI_IMAGE_USE_SCANOUT		0x0002
-@@ -1148,6 +1150,8 @@ struct __DRIdri2ExtensionRec {
+@@ -1191,6 +1193,8 @@
  
  #define __DRI_IMAGE_FOURCC_R8		0x20203852
  #define __DRI_IMAGE_FOURCC_GR88		0x38385247
 +#define __DRI_IMAGE_FOURCC_R16		0x20363152
 +#define __DRI_IMAGE_FOURCC_GR16		0x36315247
+ #define __DRI_IMAGE_FOURCC_ARGB1555	0x35315241
  #define __DRI_IMAGE_FOURCC_RGB565	0x36314752
  #define __DRI_IMAGE_FOURCC_ARGB8888	0x34325241
- #define __DRI_IMAGE_FOURCC_XRGB8888	0x34325258
 diff --git a/src/egl/drivers/dri2/egl_dri2.c b/src/egl/drivers/dri2/egl_dri2.c
 index f18e9fb..f4ed022 100644
 --- a/src/egl/drivers/dri2/egl_dri2.c
