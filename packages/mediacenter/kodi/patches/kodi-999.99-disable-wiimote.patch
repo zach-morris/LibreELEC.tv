@@ -1,0 +1,27 @@
+--- a/project/cmake/scripts/linux/ExtraTargets.cmake	2017-01-14 19:20:53.664127302 +0100
++++ b/project/cmake/scripts/linux/ExtraTargets.cmake	2017-01-14 19:21:11.234275575 +0100
+@@ -5,8 +5,3 @@
+   add_executable(${APP_NAME_LC}-xrandr ${CORE_SOURCE_DIR}/xbmc-xrandr.c)
+   target_link_libraries(${APP_NAME_LC}-xrandr ${SYSTEM_LDFLAGS} ${X_LIBRARIES} m ${XRANDR_LIBRARIES})
+ endif()
+-
+-# WiiRemote
+-if(ENABLE_EVENTCLIENTS AND BLUETOOTH_FOUND)
+-  add_subdirectory(${CORE_SOURCE_DIR}/tools/EventClients/Clients/WiiRemote build/WiiRemote)
+-endif()
+--- a/project/cmake/scripts/linux/Install.cmake	2017-01-14 19:36:40.579250429 +0100
++++ b/project/cmake/scripts/linux/Install.cmake	2017-01-14 19:37:13.376219253 +0100
+@@ -264,13 +264,6 @@
+           DESTINATION ${bindir}
+           COMPONENT kodi-eventclients-ps3)
+ 
+-  if(BLUETOOTH_FOUND)
+-    # Install kodi-eventclients-wiiremote
+-    install(PROGRAMS ${CMAKE_BINARY_DIR}/${CORE_BUILD_DIR}/WiiRemote/${APP_NAME_LC}-wiiremote
+-            DESTINATION ${bindir}
+-            COMPONENT kodi-eventclients-wiiremote)
+-  endif()
+-
+   # Install kodi-eventclients-xbmc-send
+   install(PROGRAMS "${CORE_SOURCE_DIR}/tools/EventClients/Clients/Kodi Send/kodi-send.py"
+           RENAME ${APP_NAME_LC}-send
