@@ -33,6 +33,7 @@ PKG_IS_ADDON="no"
 PKG_AUTORECONF="no"
 
 post_unpack() {
+  $SED 's@^BUILD_GPERF@#\0@' $ROOT/$PKG_BUILD/Make.Rules
   mkdir -p $ROOT/$PKG_BUILD/.$HOST_NAME
   cp -r $ROOT/$PKG_BUILD/* $ROOT/$PKG_BUILD/.$HOST_NAME
   mkdir -p $ROOT/$PKG_BUILD/.$TARGET_NAME 
