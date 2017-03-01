@@ -42,6 +42,7 @@ post_unpack() {
 
 make_host() {
   cd $ROOT/$PKG_BUILD/.$HOST_NAME
+  $SED 's@^BUILD_GPERF@#\0@' Make.Rules
   make CC=$CC \
        AR=$AR \
        RANLIB=$RANLIB \
@@ -54,6 +55,7 @@ make_host() {
 
 make_target() {
   cd $ROOT/$PKG_BUILD/.$TARGET_NAME
+  $SED 's@^BUILD_GPERF@#\0@' Make.Rules
   make CC=$CC \
        AR=$AR \
        RANLIB=$RANLIB \
