@@ -81,7 +81,6 @@ post_makeinstall_target() {
   mkdir -p $INSTALL/etc/bluetooth
     cp src/main.conf $INSTALL/etc/bluetooth
     sed -i $INSTALL/etc/bluetooth/main.conf \
-        -e 's/^#Name\ =.*/Name\ =\ LibreELEC/' \
         -e "s|^#\[Policy\]|\[Policy\]|g" \
         -e "s|^#AutoEnable.*|AutoEnable=true|g"
 }
